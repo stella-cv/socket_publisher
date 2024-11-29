@@ -15,6 +15,7 @@ class config;
 namespace data {
 class keyframe;
 class landmark;
+class marker;
 } // namespace data
 
 namespace publish {
@@ -46,6 +47,7 @@ private:
     bool publish_points_ = true;
     std::unique_ptr<std::unordered_map<unsigned int, double>> keyframe_hash_map_;
     std::unique_ptr<std::unordered_map<unsigned int, double>> point_hash_map_;
+    std::unique_ptr<std::unordered_map<unsigned int, double>> marker_hash_map_;
 
     double current_pose_hash_ = 0;
     int frame_hash_ = 0;
@@ -61,6 +63,7 @@ private:
     std::string serialize_as_protobuf(const std::vector<std::shared_ptr<stella_vslam::data::keyframe>>& keyfrms,
                                       const std::vector<std::shared_ptr<stella_vslam::data::landmark>>& all_landmarks,
                                       const std::set<std::shared_ptr<stella_vslam::data::landmark>>& local_landmarks,
+                                      const std::vector<std::shared_ptr<stella_vslam::data::marker>>& all_markers,
                                       const stella_vslam::Mat44_t& current_camera_pose);
 
     std::string base64_encode(unsigned char const* bytes_to_encode, unsigned int in_len);
