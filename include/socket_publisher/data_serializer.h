@@ -37,6 +37,8 @@ public:
 
     std::string serialize_map_diff();
 
+    std::vector<std::string> serialize_map_diff(size_t max_keyframes, size_t max_landmarks);
+
     std::string serialize_latest_frame(const unsigned int image_quality_);
 
     static std::string serialized_reset_signal_;

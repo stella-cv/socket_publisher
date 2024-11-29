@@ -71,6 +71,59 @@ std::string data_serializer::serialize_map_diff() {
     return serialize_as_protobuf(keyframes, all_landmarks, local_landmarks, all_markers, current_camera_pose);
 }
 
+std::vector<std::string> data_serializer::serialize_map_diff(size_t max_keyframes, size_t max_landmarks) {
+    std::vector<std::string> results;
+    stella_vslam::Mat44_t dummy_pose = stella_vslam::Mat44_t::Identity();
+
+    std::vector<std::shared_ptr<stella_vslam::data::keyframe>> keyframes;
+    map_publisher_->get_keyframes(keyframes);
+
+    std::vector<std::shared_ptr<stella_vslam::data::landmark>> all_landmarks;
+    std::set<std::shared_ptr<stella_vslam::data::landmark>> local_landmarks;
+    if (publish_points_) {
+        map_publisher_->get_landmarks(all_landmarks, local_landmarks);
+    }
+
+    std::vector<std::shared_ptr<stella_vslam::data::marker>> all_markers;
+    map_publisher_->get_markers(all_markers);
+
+    const auto current_camera_pose = map_publisher_->get_current_cam_pose();
+
+    // Helper function to split keyframes or landmarks into parts
+    auto send_in_parts_fn = [&results](const auto& full_vector, size_t max_size,
+                                       auto serialize_fn) {
+        using vector_type = std::decay_t<decltype(full_vector)>;
+        vector_type part_to_send;
+
+        size_t pos = 0;
+
+        while (pos < full_vector.size()) {
+            size_t tosend = full_vector.size() - pos;
+            if (tosend > max_size)
+                tosend = max_size;
+
+            for (size_t i = pos; i < pos + tosend; i++)
+                part_to_send.push_back(full_vector[i]);
+
+            pos += tosend;
+
+            auto data = serialize_fn(part_to_send);
+            results.push_back(data);
+        }
+    };
+
+    send_in_parts_fn(keyframes, max_keyframes, [this, dummy_pose](const auto& kf_to_send) {
+        return serialize_as_protobuf(kf_to_send, {}, {}, {}, dummy_pose);
+    });
+
+    send_in_parts_fn(all_landmarks, max_landmarks, [this, &keyframes, dummy_pose](const auto& lm_to_send) {
+        return serialize_as_protobuf(keyframes, lm_to_send, {}, {}, dummy_pose);
+    });
+
+    results.push_back(serialize_as_protobuf(keyframes, all_landmarks, local_landmarks, all_markers, current_camera_pose));
+    return results;
+}
+
 std::string data_serializer::serialize_latest_frame(const unsigned int image_quality) {
     const auto image = frame_publisher_->draw_frame();
     std::vector<uchar> buf;
