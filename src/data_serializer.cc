@@ -2,6 +2,7 @@
 
 #include "stella_vslam/data/keyframe.h"
 #include "stella_vslam/data/landmark.h"
+#include "stella_vslam/data/marker.h"
 #include "stella_vslam/publish/frame_publisher.h"
 #include "stella_vslam/publish/map_publisher.h"
 
@@ -20,7 +21,8 @@ data_serializer::data_serializer(const std::shared_ptr<stella_vslam::publish::fr
                                  const std::shared_ptr<stella_vslam::publish::map_publisher>& map_publisher,
                                  bool publish_points)
     : frame_publisher_(frame_publisher), map_publisher_(map_publisher), publish_points_(publish_points),
-      keyframe_hash_map_(new std::unordered_map<unsigned int, double>), point_hash_map_(new std::unordered_map<unsigned int, double>) {
+      keyframe_hash_map_(new std::unordered_map<unsigned int, double>), point_hash_map_(new std::unordered_map<unsigned int, double>),
+      marker_hash_map_(new std::unordered_map<unsigned int, double>) {
     const auto tags = std::vector<std::string>{"RESET_ALL"};
     const auto messages = std::vector<std::string>{"reset all data"};
     data_serializer::serialized_reset_signal_ = serialize_messages(tags, messages);
@@ -54,6 +56,9 @@ std::string data_serializer::serialize_map_diff() {
         map_publisher_->get_landmarks(all_landmarks, local_landmarks);
     }
 
+    std::vector<std::shared_ptr<stella_vslam::data::marker>> all_markers;
+    map_publisher_->get_markers(all_markers);
+
     const auto current_camera_pose = map_publisher_->get_current_cam_pose();
 
     const double pose_hash = get_mat_hash(current_camera_pose);
@@ -63,7 +68,60 @@ std::string data_serializer::serialize_map_diff() {
     }
     current_pose_hash_ = pose_hash;
 
-    return serialize_as_protobuf(keyframes, all_landmarks, local_landmarks, current_camera_pose);
+    return serialize_as_protobuf(keyframes, all_landmarks, local_landmarks, all_markers, current_camera_pose);
+}
+
+std::vector<std::string> data_serializer::serialize_map_diff(size_t max_keyframes, size_t max_landmarks) {
+    std::vector<std::string> results;
+    stella_vslam::Mat44_t dummy_pose = stella_vslam::Mat44_t::Identity();
+
+    std::vector<std::shared_ptr<stella_vslam::data::keyframe>> keyframes;
+    map_publisher_->get_keyframes(keyframes);
+
+    std::vector<std::shared_ptr<stella_vslam::data::landmark>> all_landmarks;
+    std::set<std::shared_ptr<stella_vslam::data::landmark>> local_landmarks;
+    if (publish_points_) {
+        map_publisher_->get_landmarks(all_landmarks, local_landmarks);
+    }
+
+    std::vector<std::shared_ptr<stella_vslam::data::marker>> all_markers;
+    map_publisher_->get_markers(all_markers);
+
+    const auto current_camera_pose = map_publisher_->get_current_cam_pose();
+
+    // Helper function to split keyframes or landmarks into parts
+    auto send_in_parts_fn = [&results](const auto& full_vector, size_t max_size,
+                                       auto serialize_fn) {
+        using vector_type = std::decay_t<decltype(full_vector)>;
+        vector_type part_to_send;
+
+        size_t pos = 0;
+
+        while (pos < full_vector.size()) {
+            size_t tosend = full_vector.size() - pos;
+            if (tosend > max_size)
+                tosend = max_size;
+
+            for (size_t i = pos; i < pos + tosend; i++)
+                part_to_send.push_back(full_vector[i]);
+
+            pos += tosend;
+
+            auto data = serialize_fn(part_to_send);
+            results.push_back(data);
+        }
+    };
+
+    send_in_parts_fn(keyframes, max_keyframes, [this, dummy_pose](const auto& kf_to_send) {
+        return serialize_as_protobuf(kf_to_send, {}, {}, {}, dummy_pose);
+    });
+
+    send_in_parts_fn(all_landmarks, max_landmarks, [this, &keyframes, dummy_pose](const auto& lm_to_send) {
+        return serialize_as_protobuf(keyframes, lm_to_send, {}, {}, dummy_pose);
+    });
+
+    results.push_back(serialize_as_protobuf(keyframes, all_landmarks, local_landmarks, all_markers, current_camera_pose));
+    return results;
 }
 
 std::string data_serializer::serialize_latest_frame(const unsigned int image_quality) {
@@ -79,6 +137,7 @@ std::string data_serializer::serialize_latest_frame(const unsigned int image_qua
 std::string data_serializer::serialize_as_protobuf(const std::vector<std::shared_ptr<stella_vslam::data::keyframe>>& keyfrms,
                                                    const std::vector<std::shared_ptr<stella_vslam::data::landmark>>& all_landmarks,
                                                    const std::set<std::shared_ptr<stella_vslam::data::landmark>>& local_landmarks,
+                                                   const std::vector<std::shared_ptr<stella_vslam::data::marker>>& all_markers,
                                                    const stella_vslam::Mat44_t& current_camera_pose) {
     map_segment::map map;
     auto message = map.add_messages();
@@ -97,6 +156,7 @@ std::string data_serializer::serialize_as_protobuf(const std::vector<std::shared
 
         const auto id = keyfrm->id_;
         const auto pose = keyfrm->get_pose_cw();
+
         const auto pose_hash = get_mat_hash(pose); // get zipped code (likely hash)
 
         next_keyframe_hash_map[id] = pose_hash;
@@ -237,6 +297,47 @@ std::string data_serializer::serialize_as_protobuf(const std::vector<std::shared
         pose_obj.add_pose(current_camera_pose(ir, il));
     }
     map.set_allocated_current_frame(&pose_obj);
+
+    // 6. markers
+    std::unordered_map<unsigned int, double> next_marker_hash_map;
+
+    for (const auto& mkr : all_markers) {
+        if (!mkr)
+            continue;
+
+        const auto id = mkr->id_;
+        std::vector<double> positions;
+        double zip = 0;
+        for (auto& pos : mkr->corners_pos_w_) {
+            zip += get_vec_hash(pos);
+
+            for (size_t i = 0; i < 3; i++)
+                positions.push_back(pos(i));
+        }
+
+        next_marker_hash_map[id] = zip;
+        if (marker_hash_map_->count(id) != 0) {
+            if (marker_hash_map_->at(id) == zip) {
+                marker_hash_map_->erase(id);
+                continue;
+            }
+            marker_hash_map_->erase(id);
+        }
+
+        auto marker_obj = map.add_markers();
+        marker_obj->set_id(id);
+        marker_obj->set_initialized(mkr->initialized_before_);
+        for (auto x : positions)
+            marker_obj->add_coords(x);
+    }
+
+    // removed markers are remaining in "marker_hash_map_".
+    for (const auto& itr : *marker_hash_map_) {
+        const auto id = itr.first;
+        auto marker_obj = map.add_markers();
+        marker_obj->set_id(id);
+    }
+    *marker_hash_map_ = next_marker_hash_map;
 
     std::string buffer;
     map.SerializeToString(&buffer);

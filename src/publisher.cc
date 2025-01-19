@@ -28,6 +28,14 @@ void publisher::run() {
     const auto serialized_reset_signal = data_serializer::serialized_reset_signal_;
     client_->emit("map_publish", serialized_reset_signal);
 
+    // Too much data at once, when starting from a loaded map for example, seems
+    // to overload the socket viewer, so in the first step we'll send things in
+    // smaller chunks
+    auto first_map_data = data_serializer_->serialize_map_diff(1000, 1000); // What are good max sizes here?
+    for (auto& s : first_map_data)
+        if (!s.empty())
+            client_->emit("map_publish", s);
+
     while (true) {
         const auto t0 = std::chrono::system_clock::now();
 
